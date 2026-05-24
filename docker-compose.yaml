@@ -1,0 +1,286 @@
+version: '3.8'
+
+services:
+
+  broker:
+    image: confluentinc/cp-kafka:7.6.1
+    hostname: broker
+    container_name: broker
+    ports:
+      - "9092:9092"
+      - "9101:9101"
+      - "1234:1234"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_JMX_PORT: 9101
+      KAFKA_JMX_HOSTNAME: localhost
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@broker:29093'
+      KAFKA_LISTENERS: 'PLAINTEXT://broker:29092,CONTROLLER://broker:29093,PLAINTEXT_HOST://0.0.0.0:9092'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_LOG_DIRS: '/tmp/kraft-combined-logs'
+      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+      KAFKA_OPTS: -javaagent:/tmp/jmx/jmx_prometheus_javaagent.jar=1234:/tmp/jmx/broker.yml
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: "2g"
+        reservations:
+          cpus: '0.5'
+          memory: "2g"
+    volumes:
+      - $PWD/jmx-exporter:/tmp/jmx/
+    networks:
+      - airflow-network 
+
+  kafka-ui:
+    container_name: kafka-ui
+    image: provectuslabs/kafka-ui:latest
+    platform: linux/amd64
+    ports:
+      - 8090:8080
+    depends_on:
+      - broker
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: broker:29092
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: "1g"
+        reservations:
+          cpus: '0.5'
+          memory: "1g"
+    networks:
+      - airflow-network 
+
+  spark:
+    image: mohamedhamed13/spark:3.5.0
+    container_name: spark
+    environment:
+      - SPARK_MODE=master
+    ports:
+      - "7077:7077"
+      - "8080:8080"
+      - "4040:4040"
+    volumes:
+      - ./shared:/data
+      - ./jars:/opt/spark/jars
+    networks:
+      - airflow-network  
+      - default
+
+  spark-worker:
+    image: mohamedhamed13/spark:3.5.0
+    container_name: spark-worker
+    depends_on:
+      - spark
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark:7077
+    ports:
+      - "8082:8081"
+    volumes:
+      - ./shared:/data
+      - ./jars:/opt/spark/jars
+    networks:
+      - airflow-network  
+      - default
+
+  jupyter:
+    image: jupyter/pyspark-notebook:spark-3.5.0
+    container_name: jupyter
+    ports:
+      - "8888:8888"
+    environment:
+      - PYSPARK_PYTHON=python3
+      - SPARK_MASTER=spark://spark:7077
+      - PYSPARK_SUBMIT_ARGS=--packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0 pyspark-shell
+    volumes:
+      - ./shared:/data
+      - ./jars:/opt/spark/jars
+    depends_on:
+      - spark
+      - broker
+    command: start-notebook.sh --NotebookApp.token='' --NotebookApp.password=''
+    networks:
+      - airflow-network  
+      - default
+
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    environment:
+      - CLUSTER_NAME=local-hadoop
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    volumes:
+      - hdfs-namenode:/hadoop/dfs/name
+      - ./shared:/data
+    networks:
+      - airflow-network 
+      - default
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode
+    environment:
+      - CLUSTER_NAME=local-hadoop
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+    ports:
+      - "9864:9864"
+    volumes:
+      - hdfs-datanode:/hadoop/dfs/data
+    depends_on:
+      - namenode
+    networks:
+      - airflow-network  
+      - default
+
+  postgres:
+    image: postgres:13
+    container_name: postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    networks:
+      - airflow-network
+
+  postgres_general:
+    image: postgres:15
+    container_name: postgres_general
+    restart: always
+    environment:
+      POSTGRES_USER: admin           ##server user_name
+      POSTGRES_PASSWORD: admin       ##server password
+      POSTGRES_DB: sessiondb         ##server database_name
+    ports:
+      - "5432:5432"                  ##port
+    volumes:
+      - postgres_general_data:/var/lib/postgresql/data
+    networks:
+      - airflow-network
+
+  pgadmin:
+    image: dpage/pgadmin4:8
+    container_name: pgadmin
+    restart: always
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com  #account username 
+      PGADMIN_DEFAULT_PASSWORD: admin         #account password 
+    ports:
+      - "8085:80"
+    depends_on:
+      - postgres_general  ##localhost / #servername / #hostname
+    networks:
+      - airflow-network
+
+  airflow-webserver:
+    image: apache/airflow:2.7.1-python3.9
+    container_name: airflow-webserver
+    restart: always
+    ports:
+      - "8089:8080"
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__WEBSERVER__BASE_URL=http://localhost:8089
+      - AIRFLOW__CORE__FERNET_KEY=3DjyQsK6JdTq4zsiK4XHzVmVEMtRzF7jwq9VDuHQx3M=
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+      - AIRFLOW__WEBSERVER__SECRET_KEY=mysecretkey
+      - AIRFLOW__LOGGING__BASE_LOG_FOLDER=/opt/airflow/logs
+      - KAGGLE_USERNAME=muhammedhamed
+      - KAGGLE_KEY=40c67eac40da8f3d2c4795f30deffcc2
+      - AIRFLOW__CORE__DEFAULT_TIMEZONE=Africa/Cairo
+      - TZ=Africa/Cairo
+    volumes:
+      - ./pip-cache:/home/airflow/.cache/pip
+      - ./dags:/opt/airflow/dags
+      - ./requirements.txt:/opt/airflow/requirements.txt
+      - ./shared:/data
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+    user: "50000:0"
+    command: >
+      bash -c "
+        if [ -f /opt/airflow/requirements.txt ]; then
+          pip install --user -r /opt/airflow/requirements.txt;
+        fi &&
+        airflow db init &&
+        airflow users create --username admin --firstname Air --lastname Flow --role Admin --email admin@example.com --password admin || true &&
+        exec airflow webserver
+      "
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - airflow-network
+
+  airflow-scheduler:
+    image: apache/airflow:2.7.1-python3.9
+    container_name: airflow-scheduler
+    restart: always
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__WEBSERVER__BASE_URL=http://localhost:8089
+      - AIRFLOW__CORE__FERNET_KEY=3DjyQsK6JdTq4zsiK4XHzVmVEMtRzF7jwq9VDuHQx3M=
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+      - AIRFLOW__WEBSERVER__SECRET_KEY=mysecretkey
+      - AIRFLOW__LOGGING__BASE_LOG_FOLDER=/opt/airflow/logs
+      - KAGGLE_USERNAME=muhammedhamed
+      - KAGGLE_KEY=5c7fdc17516bee367c2cc3aa53572fa6
+      - AIRFLOW__CORE__DEFAULT_TIMEZONE=Africa/Cairo
+      - TZ=Africa/Cairo      
+    volumes:
+      - ./pip-cache:/home/airflow/.cache/pip
+      - ./dags:/opt/airflow/dags
+      - ./requirements.txt:/opt/airflow/requirements.txt
+      - ./shared:/data
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+    user: "50000:0"
+    command: >
+      bash -c "
+        if [ -f /opt/airflow/requirements.txt ]; then
+          pip install --user -r /opt/airflow/requirements.txt;
+        fi &&
+        exec airflow scheduler
+      "
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - airflow-network
+
+networks:
+  airflow-network:
+    driver: bridge
+
+volumes:
+  hdfs-namenode:
+  hdfs-datanode:
+  pgadmin_data:
+  pg_data:
+  mongodb_data:
+  postgres-db-volume:    
+  postgres_general_data:
